@@ -1,16 +1,25 @@
 """
 BaseAgent — движок агента с циклом tool-calling.
-Version: 5.5.0
+Version: 5.6.0
 Description: Универсален для любого провайдера (URI модели берётся из settings).
+Изменения 5.6.0:
+    - пустой assistant-content не добавляется в историю (ряд провайдеров
+      отклоняет сообщения с пустым content у assistant-роли);
+    - MIN_REPORT_CHARS вынесена на уровень модуля;
+    - импорт settings через get_settings() вместо прямого импорта переменной.
 """
 import json
 import logging
 import time
 from typing import Dict, List, Optional
 
-from config.settings import settings
+from config.settings import get_settings
+
+settings = get_settings()
 
 logger = logging.getLogger("agent.base")
+
+MIN_REPORT_CHARS = 300  # порог для определения «пустого» отчёта в оркестраторе
 
 
 class UsageTracker:
@@ -77,7 +86,6 @@ class BaseAgent:
             logger.info(f"  [{self.role_name}] iteration {i + 1}/{max_iterations}")
             start_t = time.time()
 
-            # 1. API-запрос
             try:
                 response = self.client.chat.completions.create(
                     model=self.model_uri,
@@ -95,7 +103,6 @@ class BaseAgent:
             msg = response.choices[0].message
             finish_reason = response.choices[0].finish_reason
 
-            # 2. Учёт токенов
             usage = getattr(response, "usage", None)
             prompt_t = getattr(usage, "prompt_tokens", 0) if usage else 0
             compl_t = getattr(usage, "completion_tokens", 0) if usage else 0
@@ -105,32 +112,40 @@ class BaseAgent:
                 f"time={duration:.2f}s | finish={finish_reason}"
             )
 
-            # 3. Размышления модели
             if msg.content and msg.tool_calls:
                 logger.info(f"    💭 {' '.join(msg.content.split())[:140]}...")
 
-            # 4. Финальный ответ
+            # Финальный ответ
             if finish_reason == "stop" and not msg.tool_calls:
                 content = msg.content or ""
                 if not content.strip():
+                    # Пустой assistant-message не добавляем — ряд провайдеров его отклоняет
                     logger.warning(f"⚠️ [{self.role_name}] пустой ответ — пинаю...")
-                    history.append({"role": "assistant", "content": ""})
-                    history.append({"role": "user", "content": "[Система: предыдущий ответ был пустым. Продолжай выполнение задачи.]"})
+                    history.append({
+                        "role": "user",
+                        "content": "[Система: предыдущий ответ был пустым. Продолжай выполнение задачи.]",
+                    })
                     continue
-                logger.info(f"✅ [{self.role_name}] done in {time.time() - session_start:.2f}s (tokens {prompt_t}+{compl_t})")
+                logger.info(
+                    f"✅ [{self.role_name}] done in {time.time() - session_start:.2f}s "
+                    f"(tokens {prompt_t}+{compl_t})"
+                )
                 return content
 
-            # 5. Ответ обрезан по длине
+            # Ответ обрезан по длине
             if finish_reason == "length" and not msg.tool_calls:
                 logger.warning(f"⚠️ [{self.role_name}] ответ обрезан — продолжаю...")
                 history.append({"role": "assistant", "content": msg.content or ""})
                 history.append({
                     "role": "user",
-                    "content": "[Система: предыдущий ответ был обрезан по длине. Продолжи ровно с места остановки, не повторяя уже написанное.]",
+                    "content": (
+                        "[Система: предыдущий ответ был обрезан по длине. "
+                        "Продолжи ровно с места остановки, не повторяя уже написанное.]"
+                    ),
                 })
                 continue
 
-            # 6. Tool calls
+            # Tool calls
             if msg.tool_calls:
                 history.append(msg.model_dump())
                 for tc in msg.tool_calls:
@@ -178,13 +193,16 @@ class BaseAgent:
 
             break
 
-        # Бюджет исчерпан — принудительный финальный отчёт БЕЗ инструментов,
-        # чтобы не терять добытые в истории данные (кейс: чекер нашёл первоисточник и умер).
-        logger.warning(f"⚠️ [{self.role_name}] бюджет итераций исчерпан — финальный отчёт без тулов")
+        # Бюджет исчерпан — финальный отчёт без инструментов
+        logger.warning(
+            f"⚠️ [{self.role_name}] бюджет итераций исчерпан — финальный отчёт без тулов"
+        )
         history.append({
             "role": "user",
-            "content": ("[Система: бюджет вызовов инструментов исчерпан. Составь итоговый отчёт "
-                        "ПРЯМО СЕЙЧАС по уже собранным данным, в формате навыка, без вызовов инструментов.]"),
+            "content": (
+                "[Система: бюджет вызовов инструментов исчерпан. Составь итоговый отчёт "
+                "ПРЯМО СЕЙЧАС по уже собранным данным, в формате навыка, без вызовов инструментов.]"
+            ),
         })
         try:
             final_resp = self.client.chat.completions.create(
@@ -196,12 +214,16 @@ class BaseAgent:
             )
             f_usage = getattr(final_resp, "usage", None)
             if f_usage:
-                self.usage.add(getattr(f_usage, "prompt_tokens", 0),
-                               getattr(f_usage, "completion_tokens", 0), 0.0)
+                self.usage.add(
+                    getattr(f_usage, "prompt_tokens", 0),
+                    getattr(f_usage, "completion_tokens", 0),
+                    0.0,
+                )
             content = final_resp.choices[0].message.content or ""
             if content.strip():
                 logger.info(f"✅ [{self.role_name}] финальный отчёт после исчерпания бюджета")
                 return content
         except Exception as e:
             logger.error(f"❌ [{self.role_name}] финальный вызов не удался: {e}")
+
         return f"❌ Превышено количество итераций ({max_iterations})."

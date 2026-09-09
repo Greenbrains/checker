@@ -1,11 +1,10 @@
 """
 interfaces/cli.py — консольный батч-прогон фактчека.
-Version: 1.1.0
+Version: 2.1.0
 Description: логгер + запуск FactcheckOrchestrator с реестром инструментов.
 """
 import logging
 import sys
-
 from openai import OpenAI
 
 from agent.core.tools.registry import ToolRegistry
@@ -35,26 +34,40 @@ def setup_logger(log_file: str):
 def run_cli():
     settings = get_settings()
     setup_logger(settings.log_file)
+    
+    pipeline = settings.pipeline_version  # Одна строка. Без проверок.
+    
+    print(f"\n{'='*10}")
+    print(f"🚀 ЗАПУСК Пайплайна: {pipeline.upper()}")
+    print(f"{'='*10}")
+    
     provider = settings.provider
-
-    print("=" * 60)
     print(f"🔎 Factcheck Agent v{settings.system_version}")
     print(f"   Provider: {provider.display_name}")
     print(f"   Чекеры:   {settings.checker_model_list}")
     print(f"   Арбитр:   {settings.arbiter}")
-    print(f"   Input:    {settings.input_dir}/  →  Output: {settings.output_dir}/")
-    print(f"   MCP:      🚧 зарезервирован (скрапинг позже)")
-    print("=" * 60)
+    print(f"{'='*10}")
 
     client = OpenAI(api_key=provider.api_key, base_url=provider.base_url)
-    registry = ToolRegistry(openai_client=client)      # mcp_client=None — резерв
-    orchestrator = FactcheckOrchestrator(
-        client=client, settings=settings, registry=registry,
-    )
+    registry = ToolRegistry(openai_client=client)
+    
+    if pipeline == "v2":
+        try:
+            from agent.orchestrator_v2 import FactcheckOrchestratorV2
+            orchestrator = FactcheckOrchestratorV2(
+                client=client, settings=settings, registry=registry,
+            )
+        except ImportError as e:
+            print(f"❌ Ошибка импорта v2: {e}")
+            return
+    else:
+        orchestrator = FactcheckOrchestrator(
+            client=client, settings=settings, registry=registry,
+        )
 
     try:
         orchestrator.run_batch()
-        print(f"\n✅ Отчёты сохранены в {settings.output_dir}/ (check.md, check_N_*.md)")
+        print(f"\n✅ Отчёты для {pipeline} сохранены в {settings.output_dir}/")
         print(orchestrator.usage.summary())
     except FileNotFoundError as e:
         print(f"❌ {e}. Положи материалы в {settings.input_dir}/")

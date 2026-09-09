@@ -1,14 +1,20 @@
 """
-📋 agent_tools.py — фабрика инструментов factcheck-агента.
-Version: 1.2.0
+agent_tools.py — фабрика инструментов factcheck-агента.
+Version: 2.0.0
 Description:
     - декоратор @tool: автосхема OpenAI function-calling из сигнатуры и Annotated;
-    - навыки: каталог + load_skill (.agents/skills/<name>/SKILL.md + references/);
-    - локальные инструменты: bash_execute, file_read, file_write;
-    - веб-инструменты: web_search (DuckDuckGo), web_read (читалка страниц),
-      code_execute (локальная песочница).
-Изменения 1.2.0: YandexTools и folder_id удалены полностью; legacy fallback удалён;
-импорт DuckDuckGo один (duckduckgo_search), без ddgs.
+    - навыки: load_skill (.agents/skills/<name>/SKILL.md + references/);
+    - веб: web_search (метасерч ddgs: duckduckgo → brave → google → yahoo),
+      web_read (читалка страниц с ретраем);
+    - песочница: code_execute (локальная изолированная).
+
+Изменения 2.0.0:
+    - удалены неиспользуемые инструменты: bash_execute, file_read, file_write;
+    - удалена filter_tools_for_skill / SKILL_TOOLSETS — логика живёт в registry и оркестраторе;
+    - убран _ddg_html_search (фолбэк-парсер DDG html) — нестабилен, дублирует ddgs;
+    - _rank_results / _domain_score / _tokens / JUNK_DOMAINS вынесены в _search_utils;
+    - load_skills_catalog стала приватной (_load_skills_catalog).
+    - импорт settings через get_settings() вместо прямого импорта переменной.
 """
 import inspect
 import logging
@@ -17,20 +23,31 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from functools import wraps
 from pathlib import Path
 from typing import Annotated, get_args, get_origin, get_type_hints
-from urllib.parse import urlparse, quote_plus, parse_qs, unquote
+from urllib.parse import urlparse, parse_qs, unquote
 
 import httpx
 from bs4 import BeautifulSoup
 
-from config.settings import settings
+from config.settings import get_settings
+
+settings = get_settings()
+
+from ddgs import DDGS
+
+# Живые бэкенды ddgs (проверено на установленном пакете): yandex отсутствует!
+_SEARCH_BACKENDS = ("duckduckgo", "brave", "google", "yahoo")
+logging.getLogger("ddgs").setLevel(logging.ERROR)  # не спамим консоль кухней движков
 
 logger = logging.getLogger("agent.tools")
 
-_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-       "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
+_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+)
 MAX_CODE_OUTPUT_CHARS = 8000
 
 
@@ -63,16 +80,16 @@ def _extract_parameters_schema(fn) -> dict:
         if param_name in ("self", "cls", "client"):
             continue
         param_type = hints.get(param_name, str)
-        param_description = ""
+        description = ""
         actual_type = param_type
         if hasattr(param_type, "__metadata__"):
             actual_type = param_type.__args__[0]
             if param_type.__metadata__:
-                param_description = param_type.__metadata__[0]
-        prop_schema = {"type": _python_type_to_json(actual_type)}
-        if param_description:
-            prop_schema["description"] = param_description
-        properties[param_name] = prop_schema
+                description = param_type.__metadata__[0]
+        prop = {"type": _python_type_to_json(actual_type)}
+        if description:
+            prop["description"] = description
+        properties[param_name] = prop
         if param.default is inspect.Parameter.empty:
             required.append(param_name)
     schema = {"type": "object", "properties": properties}
@@ -119,7 +136,7 @@ def create_tool_router(*tool_functions) -> dict:
 # Навыки: .agents/skills/<name>/SKILL.md + references/
 # ============================================================
 
-def load_skills_catalog() -> str:
+def _load_skills_catalog() -> str:
     catalog_file = settings.skills_dir / "SKILL.md"
     if catalog_file.exists():
         return catalog_file.read_text(encoding="utf-8")
@@ -137,175 +154,219 @@ def load_skill(
 ) -> str:
     """Загружает инструкцию навыка: .agents/skills/<name>/SKILL.md (+ справочники references/*.md)."""
     if not skill_name:
-        return load_skills_catalog()
+        return _load_skills_catalog()
     skill_path = settings.skills_dir / skill_name / "SKILL.md"
     if not skill_path.exists():
         return f"❌ Навык '{skill_name}' не найден. Вызови load_skill() без аргумента для списка."
     text = skill_path.read_text(encoding="utf-8")
-    if text.startswith("---"):                       # срезаем YAML-frontmatter
-        chunks = text.split("---", 2)
-        if len(chunks) >= 3:
-            text = chunks[2]
-    if include_references:
-        ref_dir = skill_path.parent / "references"
-        if ref_dir.exists():
-            for f in sorted(ref_dir.glob("*.md")):
-                text += f"\n\n---\n# СПРАВОЧНИК: {f.name}\n\n" + f.read_text(encoding="utf-8")
-    return text.strip()
+    if text.startswith("# REDIRECT:"):
+        target = text.split(":", 1)[1].strip()
+        skill_path = settings.skills_dir / target / "SKILL.md"
+        if skill_path.exists():
+            text = skill_path.read_text(encoding="utf-8")
+    if not include_references:
+        return text
+    refs_dir = skill_path.parent / "references"
+    if not refs_dir.is_dir():
+        return text
+    parts = [text]
+    for ref in sorted(refs_dir.glob("*.md")):
+        parts.append(f"\n\n---\n## Справочник: {ref.stem}\n\n{ref.read_text(encoding='utf-8')}")
+    return "".join(parts)
 
 
 # ============================================================
-# Локальные инструменты
+# Веб: утилиты фильтрации и ранжирования
 # ============================================================
 
-@tool
-def bash_execute(command: Annotated[str, "Bash-команда для локального выполнения."]) -> str:
-    try:
-        result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=60)
-        if result.returncode == 0:
-            return result.stdout or "✅ Выполнено успешно (без вывода)"
-        return f"❌ Ошибка (код {result.returncode}):\n{result.stderr}"
-    except subprocess.TimeoutExpired:
-        return "❌ Превышено время выполнения (60 секунд)"
-    except Exception as e:
-        return f"❌ Исключение: {str(e)}"
+# Wikipedia заблокирована в РФ — 403 на всех эндпоинтах
+_BLOCKED_DOMAINS = {"wikipedia.org"}
+
+# Домены без первоисточников: форумы, астрология, соцсети, мусор
+_JUNK_DOMAINS = {
+    "otvet.mail.ru", "answers.yahoo.com", "reddit.com", "quora.com",
+    "pikabu.ru", "irecommend.ru", "otzovik.com", "yandex.ru/q",
+    "dzen.ru", "zen.yandex.ru",
+    "forums.vr-zone.com", "hotukdeals.com", "bolshoyvopros.ru",
+    "zhihu.com", "baike.baidu.com",
+    "astromeridian.ru", "horo.mail.ru", "znachenieimeny.ru", "namedb.ru",
+    "instagram.com", "youtube.com", "vk.com", "yandex.ru/video",
+    "spletnik.ru", "24smi.org", "fandom.com", "facebook.com",
+    "moneysavingexpert.com", "ispreview.co.uk", "cellphones.com.vn",
+    "registroimprese.it", "mnt.fr",
+}
 
 
-@tool
-def file_read(file_path: Annotated[str, "Путь к локальному файлу для чтения."]) -> str:
-    path = Path(file_path)
-    if path.exists():
-        return path.read_text(encoding="utf-8")
-    return f"❌ Файл не найден: {file_path}"
+def _domain_of(url: str) -> str:
+    return urlparse(url).netloc.lower().replace("www.", "")
 
 
-@tool
-def file_write(
-    file_path: Annotated[str, "Путь к локальному файлу для записи."],
-    content: Annotated[str, "Содержимое для записи в файл."],
-) -> str:
-    path = Path(file_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
-    return f"✅ Файл сохранён: {file_path}"
+def _is_blocked(url: str) -> bool:
+    return any(b in _domain_of(url) for b in _BLOCKED_DOMAINS)
 
 
-# ============================================================
-# Веб-инструменты
-# ============================================================
+def _is_junk(url: str) -> bool:
+    return any(j in _domain_of(url) for j in _JUNK_DOMAINS)
 
-def _format_search_results(results: list) -> str:
-    parts = ["🔍 Результаты поиска:\n"]
+
+def _domain_score(url: str) -> int:
+    d = _domain_of(url)
+    if d.endswith((".ru", ".рф", ".su", ".by", ".kz")):
+        return 3
+    if d.endswith(".org"):
+        return 0
+    return 1
+
+
+def _tokens(text: str) -> set:
+    text = text.lower().replace(",", ".")
+    return {t for t in re.findall(r"[a-zа-яё0-9][a-zа-яё0-9.\-]*", text)
+            if len(t) >= 3 or t.isdigit()}
+
+
+def _rank_results(query: str, results: list) -> list:
+    """Режет нерелевантный мусор и сортирует: релевантность + приоритет домена."""
+    q = _tokens(query)
+    if not q:
+        return []
+    min_overlap = 2 if len(q) >= 6 else 1
+    scored = []
+    for r in results:
+        href = r.get("href") or r.get("url") or ""
+        if not href or _is_junk(href) or _is_blocked(href):
+            continue
+        overlap = len(q & _tokens(f"{r.get('title', '')} {r.get('body', '')}"))
+        if overlap < min_overlap:
+            continue
+        scored.append((overlap * 2 + _domain_score(href), r))
+    scored.sort(key=lambda p: p[0], reverse=True)
+    return [r for _, r in scored]
+
+
+def _format_search_results(results: list, backend: str = "") -> str:
+    head = f"🔍 Результаты поиска (backend: {backend}):" if backend else "🔍 Результаты поиска:"
+    parts = [head, ""]
     for i, r in enumerate(results, 1):
         parts.append(f"{i}. {r.get('title') or '(без заголовка)'}")
         parts.append(f"   URL: {r.get('href') or r.get('url') or 'N/A'}")
-        body = (r.get('body') or '').strip()
+        body = (r.get("body") or "").strip()
         if body:
             parts.append(f"   {body}")
         parts.append("")
     return "\n".join(parts).strip()
 
 
-def _ddg_html_search(query: str, max_results: int) -> str:
-    """Фолбэк: прямой парсинг html.duckduckgo.com, когда bing-бэкенд недоступен."""
-    url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
-    try:
-        with httpx.Client(timeout=15, follow_redirects=True) as client:
-            resp = client.get(url, headers={"User-Agent": _UA})
-            resp.raise_for_status()
-    except Exception as e:
-        return f"❌ Поиск недоступен: {e}. Иди на сайт первоисточника напрямую через web_read."
-    soup = BeautifulSoup(resp.text, "html.parser")
-    parts = ["🔍 Результаты поиска (html.duckduckgo.com):\n"]
-    n = 0
-    for a in soup.select("a.result__a"):
-        if n >= min(max_results, 10):
-            break
-        href = a.get("href", "")
-        if "uddg=" in href:                      # распаковка редиректа DDG
-            href = unquote(parse_qs(urlparse(href).query).get("uddg", [href])[0])
-        snippet_el = a.find_parent("div", class_="result")
-        snippet = ""
-        if snippet_el:
-            s = snippet_el.select_one(".result__snippet")
-            snippet = s.get_text(strip=True) if s else ""
-        n += 1
-        parts.append(f"{n}. {a.get_text(strip=True)}")
-        parts.append(f"   URL: {href}")
-        if snippet:
-            parts.append(f"   {snippet}")
-        parts.append("")
-    if n == 0:
-        return "❌ Поиск не дал результатов. Переформулируй или добавь site:/кавычки."
-    return "\n".join(parts).strip()
-
+# ============================================================
+# Инструмент: web_search
+# ============================================================
 
 @tool
 def web_search(
-    query: Annotated[str, "Поисковый запрос. Операторы: site:, \"точная фраза\", -, filetype:"],
+    query: Annotated[str, "Поисковый запрос. Операторы: site:, \"точная фраза\", -, filetype:. Для RU-контента формулируй по-русски."],
     max_results: Annotated[int, "Максимум результатов (1-10)"] = 5,
 ) -> str:
-    """Поиск в интернете (DuckDuckGo, регион ru-ru). При сбое бэкенда — фолбэк на html.duckduckgo.com."""
-    from duckduckgo_search import DDGS
+    """Поиск в интернете (метасерч ddgs: duckduckgo → brave → google → yahoo, регион ru-ru).
+    Wikipedia заблокирована в РФ — не ищи там. Мусор отфильтровывается по релевантности."""
+    if "wikipedia" in query.lower():
+        query = re.sub(r"site:\S*wikipedia\S*", "", query, flags=re.IGNORECASE).strip()
+        query = re.sub(r"wikipedia\S*", "", query, flags=re.IGNORECASE).strip()
+        if not query:
+            return "❌ Wikipedia заблокирована в РФ. Используй альтернативные источники."
 
-    try:
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, region="ru-ru",
-                                     max_results=min(max(max_results, 1), 10)))
-        if results:
-            return _format_search_results(results)
-    except Exception as e:
-        logger.warning(f"DDGS-бэкенд сбоит ({e}); фолбэк на html-эндпоинт")
-    return _ddg_html_search(query, max_results)
+    limit = min(max(max_results, 1), 10)
+    raw, backend = [], ""
 
+    for b in _SEARCH_BACKENDS:
+        try:
+            with DDGS() as ddgs:
+                raw = list(ddgs.text(query, region="ru-ru", max_results=limit, backend=b))
+            if raw:
+                backend = b
+                break
+        except Exception as e:
+            logger.debug(f"ddgs backend={b} ошибка: {e}")
+            continue
+
+    if not raw:
+        return f"❌ Поиск не дал результатов по запросу: {query!r}"
+
+    ranked = _rank_results(query, raw)
+    if not ranked:
+        ranked = raw[:limit]
+
+    return _format_search_results(ranked[:limit], backend)
+
+
+# ============================================================
+# Инструмент: web_read
+# ============================================================
 
 @tool
 def web_read(
-    url: Annotated[str, "Полный URL страницы (http/https)"],
-    max_chars: Annotated[int, "Максимум символов текста к возврату"] = 6000,
+    url: Annotated[str, "URL страницы для чтения"],
+    max_chars: Annotated[int, "Максимум символов в результате (500-16000)"] = 8000,
 ) -> str:
-    """Загружает веб-страницу и извлекает основной текст (без меню/рекламы/скриптов). Для чтения первоисточников."""
-    max_chars = min(max(int(max_chars), 500), 8000)   # защита контекста от простыней
-    parsed = urlparse(url.strip())
-    if parsed.scheme not in ("http", "https"):
-        return "❌ Поддерживаются только http/https URL."
-    try:
-        with httpx.Client(timeout=15, follow_redirects=True) as client:
-            resp = client.get(url.strip(), headers={"User-Agent": _UA})
-            resp.raise_for_status()
-    except httpx.TimeoutException:
-        return f"❌ Таймаут загрузки страницы (15 сек): {url}"
-    except httpx.HTTPStatusError as e:
-        return f"❌ HTTP {e.response.status_code} при загрузке {url}"
-    except Exception as e:
-        return f"❌ Ошибка загрузки страницы: {e}"
-    enc = resp.encoding or "utf-8"
-    try:
-        html = resp.content.decode(enc, errors="replace")
-    except (LookupError, UnicodeError):
-        html = resp.content.decode("utf-8", errors="replace")
+    """Читает веб-страницу и возвращает очищенный текст. Ретрай при обрыве связи."""
+    if _is_blocked(url):
+        return f"❌ {_domain_of(url)} заблокирован в РФ (403). Используй другой источник."
+
+    max_chars = min(max(max_chars, 500), 16000)
+    last_error = ""
+
+    for attempt in range(3):
+        try:
+            with httpx.Client(
+                timeout=20,
+                follow_redirects=True,
+                headers={"User-Agent": _UA},
+            ) as client:
+                resp = client.get(url)
+                resp.raise_for_status()
+                html = resp.text
+            break
+        except httpx.HTTPStatusError as e:
+            return f"❌ HTTP {e.response.status_code}: {url}"
+        except Exception as e:
+            last_error = str(e)
+            if attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+    else:
+        return f"❌ Не удалось загрузить страницу после 3 попыток: {last_error}"
+
     soup = BeautifulSoup(html, "html.parser")
-    title = soup.title.get_text(strip=True) if soup.title else ""
-    for tag in soup(["script", "style", "noscript", "iframe", "nav", "header", "footer", "aside", "form"]):
+    for tag in soup(["script", "style", "nav", "footer", "header",
+                     "aside", "form", "noscript", "iframe"]):
         tag.decompose()
-    main = (soup.find("main") or soup.find("article")
-            or soup.find(attrs={"role": "main"}) or soup.body or soup)
-    text = main.get_text(separator="\n", strip=True)
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+    title = (soup.title.string or "").strip() if soup.title else ""
+
+    main = (
+        soup.find("article")
+        or soup.find("main")
+        or soup.find(id=re.compile(r"content|main|article", re.I))
+        or soup.find(class_=re.compile(r"content|main|article|post|text", re.I))
+        or soup.body
+    )
+    raw_text = (main or soup).get_text(separator="\n")
+    lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
     text = "\n".join(lines)
+
     total = len(text)
     if total > max_chars:
         text = text[:max_chars] + f"\n\n[… обрезано: всего на странице {total} симв.]"
+
     head = f"📄 {url}"
     if title:
         head += f"\nЗаголовок: {title}"
+
     if not text:
         return f"{head}\n\n❌ Не удалось извлечь текст (возможно, страница рендерится JavaScript)."
+
     return f"{head}\n\n{text}"
 
 
 # ============================================================
-# Песочница кода
+# Инструмент: code_execute
 # ============================================================
 
 _DANGEROUS_PATTERNS = [
@@ -328,14 +389,18 @@ def code_execute(
     for pat in _DANGEROUS_PATTERNS:
         if re.search(pat, code):
             return "❌ Отказ: в коде запрещённые операции (subprocess/exec/eval/запись файлов/rmtree)."
+
     timeout = min(max(int(timeout), 1), 60)
     tmp_path = None
     try:
         with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False, encoding="utf-8") as f:
             f.write(code)
             tmp_path = f.name
+
         env = {k: os.environ[k] for k in
-               ("PATH", "SYSTEMROOT", "TEMP", "TMP", "HOME", "USERPROFILE") if k in os.environ}
+               ("PATH", "SYSTEMROOT", "TEMP", "TMP", "HOME", "USERPROFILE")
+               if k in os.environ}
+
         result = subprocess.run(
             [sys.executable, "-I", tmp_path],
             capture_output=True, text=True, timeout=timeout,
@@ -361,26 +426,3 @@ def code_execute(
                 os.unlink(tmp_path)
             except OSError:
                 pass
-
-
-# ============================================================
-# Реестр «навык → инструменты»
-# ============================================================
-
-SKILL_TOOLSETS = {
-    "general": [
-        "bash_execute", "file_read", "file_write",
-    ],
-    # === Fact-checking: только верификация; материалы уже в сообщении ===
-    "fact-checking": [
-        "web_search", "web_read", "code_execute",
-    ],
-}
-
-
-def filter_tools_for_skill(all_tool_funcs, skill_name: str):
-    allowed = SKILL_TOOLSETS.get(skill_name)
-    if not allowed:
-        return list(all_tool_funcs)
-    allowed_set = set(allowed)
-    return [fn for fn in all_tool_funcs if getattr(fn, "_tool_name", None) in allowed_set]
