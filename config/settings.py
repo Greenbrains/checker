@@ -45,8 +45,8 @@ class Settings(BaseSettings):
     input_dir: Path = Path("input")
     output_dir: Path = Path("output")
     num_checkers_min: int = 2
-    num_checkers_max: int = 2  # Оставлено ДВА чекера
-    checker_max_iterations: int = 8  # бюджет tool-вызовов чекера (+1 финальный без тулов)
+    num_checkers_max: int = 3  #  чекера
+    checker_max_iterations: int = 9  # бюджет tool-вызовов чекера (+1 финальный без тулов)
 
     # 🚧 MCP ЗАРЕЗЕРВИРОВАН (скрапинг источников подключим позже)
     mcp_enabled: bool = False
