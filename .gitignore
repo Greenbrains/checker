@@ -11,7 +11,7 @@ __pycache__/
 
 # Logs
 *.log
-logs.txt
+#logs.txt
 
 # IDE specific
 .vscode/
@@ -40,7 +40,5 @@ Thumbs.db
 .hypothesis/
 
 # Factcheck data (keep directories with .gitkeep)
-input/*
-!input/.gitkeep
-output/*
-!output/.gitkeep
+#input/*
+#output/*
