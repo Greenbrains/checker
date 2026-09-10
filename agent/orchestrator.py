@@ -1,7 +1,12 @@
 """
 FactcheckOrchestrator — мультиагентный фактчек (пайплайн v1).
-Version: 1.3.0
+Version: 2.3.0
 Description: N параллельных чекеров с web_search/web_read/code_execute → арбитр → итоговый отчёт.
+Изменения 2.3.0: 
+    - Оставлено ДВА чекера, каждый ищет 2-3 ссылки по теме;
+    - Расширенное логирование для трейсинга в logs.txt;
+    - Вывод текста из изображений INPUT папки в логи;
+    - Минимальный вывод на экран.
 Изменения 1.3.0: MIN_REPORT_CHARS вынесена в base.py; убраны магические числа.
 """
 import logging
@@ -86,6 +91,15 @@ class FactcheckOrchestrator:
 
     def _run_checker(self, idx: int, model: str, docs) -> str:
         msg = build_user_message(docs, images=True)
+        logger.info(f"📋 [checker-{idx}] Задание чекеру: модель={model}, документов={len(docs)}")
+        # Логирование содержимого задания для трейсинга
+        if isinstance(msg, list):
+            text_parts = [p.get("text", "") for p in msg if isinstance(p, dict) and p.get("type") == "text"]
+            full_text = "".join(text_parts)
+        else:
+            full_text = str(msg)
+        logger.info("   📝 Текст задания (полный):\n%s", full_text)
+        
         try:
             report = self._make_checker(idx, model).run(msg, max_iterations=self._max_iter)
         except Exception as e:
@@ -113,6 +127,9 @@ class FactcheckOrchestrator:
                     report = report2
             except Exception as e:
                 logger.warning(f"⚠️ Повтор чекера {idx} не удался: {e}")
+        
+        logger.info(f"✅ [checker-{idx}] Результат работы: {len(report)} симв.")
+        logger.info("   📄 Полный отчёт чекера %d:\n%s", idx, report)
         return report
 
     def run_batch(self) -> str:

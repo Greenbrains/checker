@@ -1,44 +1,46 @@
-# Dependencies
+```
+# Python
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
-
-# Environment variables
+.Python
+env/
+venv/
+.venv/
+.ENV
 .env
 .env.local
 .env.*
+.venv/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+.coverage
+htmlcov/
+.coverage.*
 
 # Logs
 *.log
-#logs.txt
 
-# IDE specific
+# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
+*.tmp
 
-# OS generated files
+# OS
 .DS_Store
 Thumbs.db
-
-# Temporary files
-*.tmp
-*.temp
-
-# Python specific
-*.py[cod]
-*$py.class
-*.so
-.Python
-*.sqlite3
 
 # Testing
 .pytest_cache/
 .mypy_cache/
-.hypothesis/
-
-# Factcheck data (keep directories with .gitkeep)
-#input/*
-#output/*
+```

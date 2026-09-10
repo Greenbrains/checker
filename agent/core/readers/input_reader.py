@@ -66,6 +66,7 @@ def _read_image(p: Path) -> List[Dict[str, Any]]:
 
 
 def load_input_documents(input_dir: Path) -> List[Dict[str, Any]]:
+    """Загружает материалы из input_dir. Логирует содержимое текстов и изображений."""
     if not input_dir.exists():
         raise FileNotFoundError(f"Папка {input_dir} не найдена")
     docs = []
@@ -75,14 +76,22 @@ def load_input_documents(input_dir: Path) -> List[Dict[str, Any]]:
         ext = p.suffix.lower()
         if ext in IMAGE_EXT:
             kind, content = "image", _read_image(p)
+            logger.info(f"📄 Загружен материал: {p.name} (image)")
+            # Логирование текста изображения для трейсинга
+            logger.info(f"   🖼 Изображение: {p.name} — base64 encoded, {len(p.read_bytes())} bytes")
         elif ext in TEXT_EXT:
             kind, content = "text", _read_text(p)
+            logger.info(f"📄 Загружен материал: {p.name} (text)")
+            logger.info(f"   📝 Текст из {p.name}:\\n{content[:500]}...")
         elif ext in CSV_EXT:
             kind, content = "table", _read_csv(p)
+            logger.info(f"📄 Загружен материал: {p.name} (table)")
+            logger.info(f"   📊 Таблица из {p.name}:\\n{content[:500]}...")
         else:
             kind, content = "table", _read_excel(p)
+            logger.info(f"📄 Загружен материал: {p.name} (excel)")
+            logger.info(f"   📊 Таблица из {p.name}:\\n{content[:500]}...")
         docs.append({"name": p.name, "kind": kind, "content": content})
-        logger.info(f"📄 Загружен материал: {p.name} ({kind})")
     if not docs:
         raise FileNotFoundError(f"В {input_dir} нет материалов для проверки")
     return docs

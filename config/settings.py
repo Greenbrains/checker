@@ -38,14 +38,14 @@ class Settings(BaseSettings):
     router_model: str = "z-ai/glm-5.3-flash"
 
     # Модели-чекеры (2–4 штуки, через запятую)
-    checker_models: str = "z-ai/glm-5.3-flash,google/gemini-3.5-flash-lite,inception/mercury-2.5"
+    checker_models: str = "z-ai/glm-5.3-flash,google/gemini-3.5-flash-lite"
     arbiter_model: str = ""  # пусто => model_agent активного провайдера
 
     # Каталоги
     input_dir: Path = Path("input")
     output_dir: Path = Path("output")
     num_checkers_min: int = 2
-    num_checkers_max: int = 4
+    num_checkers_max: int = 2  # Оставлено ДВА чекера
     checker_max_iterations: int = 8  # бюджет tool-вызовов чекера (+1 финальный без тулов)
 
     # 🚧 MCP ЗАРЕЗЕРВИРОВАН (скрапинг источников подключим позже)
