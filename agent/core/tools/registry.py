@@ -38,6 +38,15 @@ class ToolRegistry:
         self.schemas = collect_tools(*self.all_tools)
         self.router = create_tool_router(*self.all_tools)
 
+    def get_tools_by_names(self, allowed_names: set):
+        """Возвращает (schemas, router) для набора имён инструментов."""
+        if not allowed_names:
+            # пустое множество — все инструменты
+            return self.schemas, self.router
+        filtered = [fn for fn in self.all_tools
+                    if getattr(fn, "_tool_name", None) in allowed_names]
+        return collect_tools(*filtered), create_tool_router(*filtered)
+
     def get_tools_for_skill(self, skill_name: str):
         """Возвращает (schemas, router) для навыка.
 

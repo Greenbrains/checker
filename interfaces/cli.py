@@ -60,6 +60,15 @@ def run_cli():
         except ImportError as e:
             print(f"❌ Ошибка импорта v2: {e}")
             return
+    elif pipeline == "v3":
+        try:
+            from agent.orchestrator_v3 import FactcheckOrchestratorV3
+            orchestrator = FactcheckOrchestratorV3(
+                client=client, settings=settings, registry=registry,
+            )
+        except ImportError as e:
+            print(f"❌ Ошибка импорта v3: {e}")
+            return
     else:
         orchestrator = FactcheckOrchestrator(
             client=client, settings=settings, registry=registry,
