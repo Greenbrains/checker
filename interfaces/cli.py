@@ -1,7 +1,7 @@
 """
 interfaces/cli.py — консольный батч-прогон фактчека.
-Version: 2.1.0
-Description: логгер + запуск FactcheckOrchestrator с реестром инструментов.
+Version: 2.2.0
+Description: логгер + запуск оркестратора по версии пайплайна (v1, v2, v3, v3.1).
 """
 import logging
 import sys
@@ -13,6 +13,7 @@ from config.settings import get_settings
 
 
 def setup_logger(log_file: str):
+    """Настройка логгера: файл + консоль."""
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)
     root.handlers.clear()
@@ -22,7 +23,6 @@ def setup_logger(log_file: str):
         "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     ))
-    root.addHandler(fh)
     sh = logging.StreamHandler(sys.stdout)
     sh.setLevel(logging.INFO)
     sh.setFormatter(logging.Formatter("%(message)s"))
@@ -32,10 +32,11 @@ def setup_logger(log_file: str):
 
 
 def run_cli():
+    """Запуск CLI с выбором пайплайна из настроек."""
     settings = get_settings()
     setup_logger(settings.log_file)
     
-    pipeline = settings.pipeline_version  # Одна строка. Без проверок.
+    pipeline = settings.pipeline_version
     
     print(f"\n{'='*10}")
     print(f"🚀 ЗАПУСК Пайплайна: {pipeline.upper()}")
@@ -69,6 +70,13 @@ def run_cli():
         except ImportError as e:
             print(f"❌ Ошибка импорта v3: {e}")
             return
+    elif pipeline == "v3.1":
+        try:
+            from agent.orchestrator_v31 import FactcheckOrchestratorV31
+            orchestrator = FactcheckOrchestratorV31()
+        except ImportError as e:
+            print(f"❌ Ошибка импорта v3.1: {e}")
+            return
     else:
         orchestrator = FactcheckOrchestrator(
             client=client, settings=settings, registry=registry,
@@ -77,7 +85,8 @@ def run_cli():
     try:
         orchestrator.run_batch()
         print(f"\n✅ Отчёты для {pipeline} сохранены в {settings.output_dir}/")
-        print(orchestrator.usage.summary())
+        if hasattr(orchestrator, 'usage'):
+            print(orchestrator.usage.summary())
     except FileNotFoundError as e:
         print(f"❌ {e}. Положи материалы в {settings.input_dir}/")
     except Exception as e:
