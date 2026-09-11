@@ -180,7 +180,7 @@ def run_fact_checking(context: PipelineContext) -> PipelineState:
         from openai import OpenAI
         p = context.settings.provider
         client = OpenAI(api_key=p.api_key, base_url=p.base_url,
-                        timeout=context.settings.request_timeout)
+                        timeout=getattr(context.settings, "api_timeout", 120.0))
         context.metadata["client"] = client
     if registry is None:
         from agent.core.tools.registry import ToolRegistry

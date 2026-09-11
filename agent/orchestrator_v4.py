@@ -37,6 +37,10 @@ class FactcheckOrchestratorV4:
         # Кеш источников
         self.source_cache = SourceCache()
         
+        # Передаём client и registry в metadata контекста
+        self._client = self.client
+        self._registry = self.registry
+        
         logger.info(f"🚀 Orchestrator v4 инициализирован")
         logger.info(f"📁 Output dir: {self.settings.output_dir}")
     
@@ -50,6 +54,10 @@ class FactcheckOrchestratorV4:
         context = PipelineContext(
             settings=self.settings,
             source_cache=self.source_cache._cache,
+            metadata={
+                "client": self._client,
+                "registry": self._registry,
+            },
         )
         
         # Загружаем документы
