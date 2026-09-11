@@ -82,10 +82,15 @@ def extract_facts_from_chunk(chunk_text: str, chunk_index: int) -> List[Fact]:
 def distribute_facts_to_checkers(facts: List[Fact], num_checkers: int,
                                  max_per_checker: int = 40) -> Dict[int, List[str]]:
     """Равномерная раскладка: критичные идут первыми, каждый чекер получает свою долю."""
-    distribution: Dict[int, List[str]] = {i: [] for i in range(1, max(1, num_checkers) + 1)}
     if num_checkers <= 0:
-        return distribution
-
+        num_checkers = 1
+    
+    # Если лимит 0 или отрицательный - используем разумный дефолт
+    if max_per_checker <= 0:
+        max_per_checker = 40
+    
+    distribution: Dict[int, List[str]] = {i: [] for i in range(1, num_checkers + 1)}
+    
     ordered = [f for f in facts if f.priority == "critical"] + [f for f in facts if f.priority != "critical"]
     limit = max_per_checker * num_checkers
     if len(ordered) > limit:

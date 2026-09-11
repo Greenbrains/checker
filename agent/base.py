@@ -39,6 +39,14 @@ class UsageTracker:
         self.request_count += 1
         self.total_time += duration
 
+    def merge(self, other: 'UsageTracker'):
+        """Сливает статистику из другого трекера."""
+        self.prompt_tokens += other.prompt_tokens
+        self.completion_tokens += other.completion_tokens
+        self.total_tokens += other.total_tokens
+        self.request_count += other.request_count
+        self.total_time += other.total_time
+
     def summary(self) -> str:
         return (
             f"📊 Сессия: {self.request_count} запросов | "

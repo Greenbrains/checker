@@ -20,33 +20,17 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-MANIFEST
+
+# Logs
+*.log
+logs/
 
 # Environment
 .env
 .env.local
 .env.*
+.env~*
 .venv/
 venv/
 ENV/
-env.bak/
-.venv.bak/
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*.tmp
-
-# Logs
-*.log
-
-# Coverage
-.coverage
-htmlcov/
-.coverage.*
-.cache
-.pytest_cache/
-.mypy_cache/
 ```
