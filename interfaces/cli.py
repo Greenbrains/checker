@@ -14,6 +14,14 @@ from config.settings import get_settings
 
 def setup_logger(log_file: str):
     """Настройка логгера: файл + консоль."""
+    
+    # Сначала настраиваем propagate для всех подлоггеров agent.* ДО очистки root.handlers
+    for name in ["agent", "agent.orchestrator_v4", "agent.state", "agent.state.graph",
+                 "agent.state.nodes", "agent.base", "agent.subagents", "cli"]:
+        lg = logging.getLogger(name)
+        lg.handlers.clear()
+        lg.propagate = True
+    
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)
     root.handlers.clear()
@@ -26,7 +34,9 @@ def setup_logger(log_file: str):
     sh = logging.StreamHandler(sys.stdout)
     sh.setLevel(logging.INFO)
     sh.setFormatter(logging.Formatter("%(message)s"))
+    root.addHandler(fh)
     root.addHandler(sh)
+    
     for noisy in ("httpx", "httpcore", "openai", "urllib3", "primp", "rquest", "cookie_store", "duckduckgo_search"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
