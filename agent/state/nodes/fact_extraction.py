@@ -125,7 +125,7 @@ def extract_facts(context: PipelineContext) -> PipelineState:
     if dropped:
         logger.info("🔄 Дедупликация: отброшено %d дубликатов", dropped)
 
-    context.set_facts(unique)
+    context.facts = unique
     critical = sum(1 for f in unique if f.priority == "critical")
     logger.info("✅ Извлечено фактов: %d (критичных: %d)", len(unique), critical)
 

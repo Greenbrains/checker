@@ -21,6 +21,11 @@ class Fact:
     sources: List[str] = field(default_factory=list)  # найденные источники
     verified: bool = False  # проверен ли факт
     verification_result: Optional[str] = None  # результат проверки
+    
+    def prompt_line(self) -> str:
+        """Формирует строку для промпта чекера."""
+        marker = "‼️" if self.priority == "critical" else "•"
+        return f"[{self.id}] {marker} {self.text} (тип: {self.fact_type})"
 
 
 @dataclass
@@ -94,6 +99,27 @@ class PipelineContext:
         import time
         self.history.append((node_name, time.time()))
         self.current_node = node_name
+    
+    @property
+    def node_path(self) -> List[str]:
+        """Возвращает список пройденных узлов."""
+        return [h[0] for h in self.history]
+    
+    def cache_get(self, key: str) -> Optional[Any]:
+        """Получает значение из кеша."""
+        normalized_key = key.lower().strip()
+        cached = self.source_cache.get(normalized_key)
+        if cached:
+            return cached.get("results") or cached.get("value")
+        return None
+    
+    def cache_put(self, key: str, value: Any):
+        """Сохраняет значение в кеш."""
+        normalized_key = key.lower().strip()
+        self.source_cache[normalized_key] = {
+            "results": value,
+            "timestamp": time.time()
+        }
     
     def get_facts_for_checker(self, checker_idx: int) -> List[Fact]:
         """Возвращает факты, назначенные чекеру."""
