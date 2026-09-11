@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     mcp_url: str = ""
 
     # Пайплайн: "v1" = параллельные чекеры; "v2" = claims-based
-    pipeline_version: str = "v3"
+    pipeline_version: str = "v3.1"
 
     # Системное
     log_file: str = "logs.txt"

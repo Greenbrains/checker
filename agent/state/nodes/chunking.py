@@ -1,95 +1,53 @@
 """
-Узел 4: Нарезка на чанки.
-Программная нарезка текста (без LLM).
+Узел 4: Нарезка текста на чанки. Программная логика, без LLM.
 """
 import logging
-import re
 
-from agent.state.context import PipelineContext, PipelineState, Chunk
+from agent.state.context import Chunk, PipelineContext, PipelineState
+from agent.state.text_utils import split_into_chunks
 
 logger = logging.getLogger("agent.state.nodes.chunking")
 
-# Параметры нарезки
-DEFAULT_SENTENCES_PER_CHUNK = 8  # 7-10 предложений
-
-
-def split_into_chunks(text: str, sentences_per_chunk: int = DEFAULT_SENTENCES_PER_CHUNK) -> list:
-    """
-    Разбивает текст на чанки по предложениям.
-    
-    Args:
-        text: текст для разбивки
-        sentences_per_chunk: количество предложений в чанке
-    
-    Returns:
-        список чанков (строки)
-    """
-    # Разбиваем на предложения (учитываем . ! ? \n)
-    sentences = re.split(r'(?<=[.!?])\s+', text)
-    sentences = [s.strip() for s in sentences if s.strip()]
-    
-    chunks = []
-    for i in range(0, len(sentences), sentences_per_chunk):
-        chunk_sentences = sentences[i:i + sentences_per_chunk]
-        chunk_text = ' '.join(chunk_sentences)
-        if chunk_text.strip():
-            chunks.append(chunk_text)
-    
-    return chunks
+DEFAULT_SENTENCES_PER_CHUNK = 8
+CHUNK_CONTEXT = (
+    "Проверь все фактические утверждения: даты, числа, названия, цитаты, "
+    "направление динамики."
+)
 
 
 def split_chunks(context: PipelineContext) -> PipelineState:
-    """
-    Нарезает текст на чанки программно.
-    
-    Без использования LLM — только программная логика.
-    """
-    logger.info(f"🔪 Нарезка текста на чанки (по {DEFAULT_SENTENCES_PER_CHUNK} предложений)")
-    
+    """Нарезает context.extracted_text на чанки и сохраняет их в output/chunks/."""
+    if context.settings is None:
+        return PipelineState(success=False, error="context.settings не задан", context=context)
+
+    per_chunk = int(getattr(context.settings, "sentences_per_chunk", DEFAULT_SENTENCES_PER_CHUNK))
+    logger.info("🔪 Нарезка текста на чанки (по %d предложений)", per_chunk)
+
     if not context.extracted_text:
-        return PipelineState(
-            success=False,
-            error="Текст не извлечён"
-        )
-    
-    # Нарезаем текст
-    chunk_texts = split_into_chunks(
-        context.extracted_text,
-        sentences_per_chunk=DEFAULT_SENTENCES_PER_CHUNK
-    )
-    
+        return PipelineState(success=False, error="Текст не извлечён", context=context)
+
+    chunk_texts = split_into_chunks(context.extracted_text, sentences_per_chunk=per_chunk)
     if not chunk_texts:
-        return PipelineState(
-            success=False,
-            error="Не удалось разбить текст на чанки"
-        )
-    
-    # Создаём объекты Chunk
-    context.chunks = []
-    for i, text in enumerate(chunk_texts, 1):
-        chunk = Chunk(
-            index=i,
-            context="Проверь все фактические утверждения: даты, числа, названия, цитаты, направления динамики.",
-            text=text
-        )
-        context.chunks.append(chunk)
-    
-    logger.info(f"✅ Создано чанков: {len(context.chunks)}")
-    
-    # Сохраняем чанки в файлы для отладки
+        return PipelineState(success=False, error="Не удалось разбить текст на чанки", context=context)
+
+    context.chunks = [
+        Chunk(index=i, context=CHUNK_CONTEXT, text=text)
+        for i, text in enumerate(chunk_texts, 1)
+    ]
+    logger.info("✅ Создано чанков: %d (ср. %d симв.)",
+                len(context.chunks),
+                context.text_length // max(1, len(context.chunks)))
+
     try:
         chunks_dir = context.settings.output_dir / "chunks"
-        chunks_dir.mkdir(exist_ok=True)
-        
+        chunks_dir.mkdir(parents=True, exist_ok=True)
         for chunk in context.chunks:
-            chunk_file = chunks_dir / f"chunk_{chunk.index}.md"
-            chunk_file.write_text(
+            (chunks_dir / f"chunk_{chunk.index}.md").write_text(
                 f"## Чанк {chunk.index}\n\nКонтекст: {chunk.context}\n\nТекст:\n{chunk.text}\n",
-                encoding="utf-8"
+                encoding="utf-8",
             )
-        
-        logger.info(f"📁 Чанки сохранены в {chunks_dir}")
+        logger.info("📁 Чанки сохранены в %s", chunks_dir)
     except Exception as e:
-        logger.warning(f"⚠️ Не удалось сохранить чанки: {e}")
-    
+        logger.warning("⚠️ Не удалось сохранить чанки: %s", e)
+
     return PipelineState(context=context)

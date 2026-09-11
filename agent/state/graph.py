@@ -1,9 +1,17 @@
 """
-State graph для пайплайна v3.1.
-Определяет узлы, рёбра и условные переходы графа состояний.
+State graph пайплайна v3.1.
+Version: 3.2.0
+Изменения 3.2.0:
+    - ИСПРАВЛЕН бесконечный цикл на терминальном узле: `current = next or current`
+      при next=None оставлял узел тем же (report крутился вечно);
+    - защита от зацикливания: max_steps + лимит посещений узла;
+    - next_node может быть как условием, так и прямым именем узла;
+    - несуществующие рёбра логируются и откатываются к базовому ребру;
+    - возвращаемый PipelineState всегда несёт context.
 """
 import logging
-from typing import Dict, Callable, Optional
+from collections import Counter
+from typing import Callable, Dict, Optional
 
 from agent.state.context import PipelineContext, PipelineState
 
@@ -11,32 +19,18 @@ logger = logging.getLogger("agent.state.graph")
 
 
 class StateGraph:
-    """
-    Граф состояний пайплайна v3.1.
-    
-    Узлы:
-        - input_analysis: анализ типа входа
-        - text_extraction: извлечение текста (ридер)
-        - length_check: проверка длины текста
-        - chunking: нарезка на чанки
-        - fact_extraction: извлечение фактов
-        - fact_checking: проверка фактов чекерами
-        - summarization: суммаризация отчётов
-        - arbitration: арбитраж
-        - report: генерация итогового отчёта
-    
-    Рёбра определяются динамически на основе результатов узлов.
-    """
-    
-    def __init__(self):
+    """Граф состояний пайплайна v3.1 (узлы + условные рёбра)."""
+
+    def __init__(self, max_steps: int = 50, max_node_visits: int = 3, entry_node: str = "input_analysis"):
         self.nodes: Dict[str, Callable[[PipelineContext], PipelineState]] = {}
-        self.edges: Dict[str, str] = {}  # node -> next_node
-        self.conditional_edges: Dict[str, Dict[str, str]] = {}  # node -> {condition: next_node}
-        
+        self.edges: Dict[str, Optional[str]] = {}
+        self.conditional_edges: Dict[str, Dict[str, str]] = {}
+        self.max_steps = max_steps
+        self.max_node_visits = max_node_visits
+        self.entry_node = entry_node
         self._register_nodes()
-    
-    def _register_nodes(self):
-        """Регистрирует все узлы графа."""
+
+    def _register_nodes(self) -> None:
         from agent.state.nodes.input_analysis import analyze_input
         from agent.state.nodes.text_extraction import extract_text
         from agent.state.nodes.length_check import check_length
@@ -46,7 +40,7 @@ class StateGraph:
         from agent.state.nodes.summarization import summarize_reports
         from agent.state.nodes.arbitration import run_arbitration
         from agent.state.nodes.report import generate_report
-        
+
         self.nodes = {
             "input_analysis": analyze_input,
             "text_extraction": extract_text,
@@ -58,21 +52,21 @@ class StateGraph:
             "arbitration": run_arbitration,
             "report": generate_report,
         }
-        
-        # Базовые рёбра (линейный поток по умолчанию)
+
+        # Базовые (линейные) рёбра
         self.edges = {
-            "input_analysis": "text_extraction",  # Условное: может перейти сразу к length_check
+            "input_analysis": "text_extraction",
             "text_extraction": "length_check",
-            "length_check": None,  # Условное: chunking или fact_extraction
+            "length_check": None,          # решается условным ребром
             "chunking": "fact_extraction",
             "fact_extraction": "fact_checking",
             "fact_checking": "summarization",
             "summarization": "arbitration",
             "arbitration": "report",
-            "report": None,  # Конец
+            "report": None,                # конец графа
         }
-        
-        # Условные переходы
+
+        # Условные переходы: имя условия → узел
         self.conditional_edges = {
             "input_analysis": {
                 "image_or_table": "text_extraction",
@@ -83,77 +77,99 @@ class StateGraph:
                 "no_chunking_needed": "fact_extraction",
             },
         }
-    
-    def get_next_node(self, current_node: str, condition: Optional[str] = None) -> Optional[str]:
-        """
-        Определяет следующий узел на основе текущего и условия.
-        
-        Args:
-            current_node: текущий узел
-            condition: условие перехода (если есть)
-        
-        Returns:
-            Имя следующего узла или None (конец графа)
-        """
-        if current_node not in self.nodes:
-            logger.error(f"❌ Неизвестный узел: {current_node}")
+
+    # ---------- резолв перехода ----------
+
+    def _base_next(self, node: str) -> Optional[str]:
+        nxt = self.edges.get(node)
+        if nxt is not None and nxt not in self.nodes:
+            logger.error("❌ Узел %s ссылается на несуществующий узел %r", node, nxt)
             return None
-        
-        # Проверяем условные переходы
-        if current_node in self.conditional_edges and condition:
-            conditional = self.conditional_edges[current_node]
-            if condition in conditional:
-                return conditional[condition]
-        
-        # Возвращаем базовое ребро
-        return self.edges.get(current_node)
-    
+        return nxt
+
+    def get_next_node(self, current_node: str, condition: Optional[str] = None) -> Optional[str]:
+        """Следующий узел: сначала условие, потом базовое ребро. None — конец графа."""
+        if current_node not in self.nodes:
+            logger.error("❌ Неизвестный узел: %s", current_node)
+            return None
+
+        if condition:
+            # Разрешаем узлу вернуть сразу имя узла
+            if condition in self.nodes:
+                return condition
+            table = self.conditional_edges.get(current_node)
+            if table:
+                target = table.get(condition)
+                if target:
+                    if target in self.nodes:
+                        return target
+                    logger.error("❌ Условие %r узла %s ведёт в несуществующий узел %r",
+                                 condition, current_node, target)
+                    return self._base_next(current_node)
+            logger.warning("⚠️ Узел %s: неизвестное условие %r — беру базовое ребро",
+                           current_node, condition)
+
+        return self._base_next(current_node)
+
+    # ---------- выполнение ----------
+
     def execute(self, context: PipelineContext) -> PipelineState:
-        """
-        Выполняет граф состояний.
-        
-        Args:
-            context: начальный контекст пайплайна
-        
-        Returns:
-            Финальное состояние после выполнения всех узлов
-        """
-        current_node = "input_analysis"
+        """Прогоняет контекст по графу до конца (или до ошибки/лимита)."""
+        current_node: Optional[str] = self.entry_node
         state = PipelineState(context=context)
-        
+        visits: Counter = Counter()
+        steps = 0
+
         logger.info("🚀 Запуск графа состояний v3.1")
-        
+
         while current_node is not None:
-            context.add_history(current_node)
-            logger.info(f"📍 Узел: {current_node}")
-            
-            if current_node not in self.nodes:
-                state.error = f"Неизвестный узел: {current_node}"
+            steps += 1
+            if steps > self.max_steps:
                 state.success = False
+                state.error = f"Превышен лимит шагов графа ({self.max_steps})"
+                logger.error("❌ %s", state.error)
                 break
-            
+
+            visits[current_node] += 1
+            if visits[current_node] > self.max_node_visits:
+                state.success = False
+                state.error = f"Узел {current_node} посещён более {self.max_node_visits} раз — петля"
+                logger.error("❌ %s", state.error)
+                break
+
+            context.add_history(current_node)
+            logger.info("📍 Узел: %s (шаг %d)", current_node, steps)
+
+            node_func = self.nodes.get(current_node)
+            if node_func is None:
+                state.success = False
+                state.error = f"Неизвестный узел: {current_node}"
+                logger.error("❌ %s", state.error)
+                break
+
             try:
-                node_func = self.nodes[current_node]
-                state = node_func(context)
-                
-                if not state.success:
-                    logger.error(f"❌ Ошибка в узле {current_node}: {state.error}")
-                    break
-                
-                # Определяем следующий узел
-                next_node = self.get_next_node(current_node, state.next_node)
-                
-                if next_node is None and current_node != "report":
-                    # Конец графа
-                    break
-                
-                current_node = next_node or current_node
-                
+                result = node_func(context)
+                state = result if result is not None else PipelineState(context=context)
+                if state.context is None:
+                    state.context = context
             except Exception as e:
-                logger.exception(f"❌ Исключение в узле {current_node}: {e}")
+                logger.exception("❌ Исключение в узле %s: %s", current_node, e)
                 state.success = False
                 state.error = str(e)
+                state.context = context
                 break
-        
-        logger.info(f"{'✅' if state.success else '❌'} Граф завершён")
+
+            if not state.success:
+                logger.error("❌ Ошибка в узле %s: %s", current_node, state.error)
+                break
+
+            next_node = self.get_next_node(current_node, state.next_node)
+            if next_node is None:
+                logger.info("🏁 Конец графа (узел %s)", current_node)
+                break
+            current_node = next_node
+
+        state.context = state.context or context
+        logger.info("%s Граф завершён: %s", "✅" if state.success else "❌",
+                    " → ".join(context.node_path))
         return state
