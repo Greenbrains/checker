@@ -76,7 +76,7 @@ class Settings(BaseSettings):
     mcp_url: str = ""
 
     # ---------- системное ----------
-    pipeline_version: str = "v3.1"
+    pipeline_version: str = "v4"
     log_file: str = "logs.txt"
     log_level: str = "INFO"                  # уровень консоли; файл всегда DEBUG
     log_max_bytes: int = 5_000_000

@@ -1,7 +1,7 @@
 """
 interfaces/cli.py — консольный батч-прогон фактчека.
 Version: 2.2.0
-Description: логгер + запуск оркестратора по версии пайплайна (v1, v2, v3, v3.1).
+Description: логгер + запуск оркестратора по версии пайплайна (v1, v2, v3, v4).
 """
 import logging
 import sys
@@ -69,6 +69,13 @@ def run_cli():
             )
         except ImportError as e:
             print(f"❌ Ошибка импорта v3: {e}")
+            return
+    elif pipeline == "v4":
+        try:
+            from agent.orchestrator_v4 import FactcheckOrchestratorV4
+            orchestrator = FactcheckOrchestratorV4()
+        except ImportError as e:
+            print(f"❌ Ошибка импорта v4: {e}")
             return
     elif pipeline == "v3.1":
         try:
